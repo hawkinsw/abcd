@@ -1,0 +1,6 @@
+[submodule "deps/args"]
+	path = deps/args
+	url = https://github.com/Taywee/args.git
+[submodule "deps/zydis"]
+	path = deps/zydis
+	url = https://github.com/zyantific/zydis.git
