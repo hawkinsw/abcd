@@ -8,11 +8,10 @@ hello:  db "Hello, ASM!", 10
 _start: mov rdi, hello ; the first parameter to `puts` is the string to print.
                        ; Calling conventions say that 1st param always goes
                        ; in rdi
-				jmp 4
-				mov r8, 0x90909090
-				; jmp short -1
-				jmp -3
+				jmp 10
+				mov r8, 0xb8419090
         call puts      ; call puts
+				jmp -8
         ;-----
         mov rax, 60    ; 60 is the system call for exit
         xor rdi, rdi   ; set the return value of the process to 0.
