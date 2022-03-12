@@ -16,7 +16,6 @@ public:
   }
   VirtualData(const VirtualData &) = delete;
   VirtualData(VirtualData &&other) {
-    std::cout << "Using a move constructor=.\n";
     m_data = other.m_data;
     m_virtual_size = other.m_virtual_size;
     m_virtual_start = other.m_virtual_start;
@@ -27,7 +26,6 @@ public:
 
   VirtualData &operator=(VirtualData &) = delete;
   VirtualData &operator=(VirtualData &&other) {
-    std::cout << "Using a move operator=.\n";
     m_data = other.m_data;
     m_virtual_size = other.m_virtual_size;
     m_virtual_start = other.m_virtual_start;

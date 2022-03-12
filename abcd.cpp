@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <iostream>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -80,7 +82,7 @@ bool ABCD::initialize(std::string &err_message) {
       program_scn_data = elf_getdata(program_scn, nullptr);
 
       if (m_debug) {
-        std::cout << "Found the program section!";
+        std::cout << "Found the program section!\n";
       }
       break;
     }
@@ -111,7 +113,207 @@ bool ABCD::initialize(std::string &err_message) {
   return true;
 }
 
-bool ABCD::linear_disassemble(uint64_t &bad_insn_addr) {
+bool RecursiveABCD::disassemble(uint64_t &bad_insn_addr) {
+
+  if (!m_initialized) {
+    bad_insn_addr = 0;
+    return false;
+  }
+
+  ZydisDecoder decoder;
+  ZydisFormatter formatter;
+  ZydisDecodedInstruction instruction;
+  ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT_VISIBLE];
+
+  const static int LARGEST_X86_64_INSTR = 15;
+  const static int DECODED_INSTRUCTION_BUFFER_LENGTH = 256;
+  char decoded_instruction_buffer[DECODED_INSTRUCTION_BUFFER_LENGTH] = {
+      0,
+  };
+
+  ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+  ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL);
+
+  std::vector<uint64_t> targets_to_consider{};
+  std::set<uint64_t> targets{};
+
+  targets_to_consider.push_back(m_entry_point);
+  while (!targets_to_consider.empty()) {
+    uint64_t disassembly_range_begin = targets_to_consider.back();
+    targets_to_consider.pop_back();
+
+    if (m_debug) {
+      std::cout << "targets_to_consider.size(): " << std::dec << targets_to_consider.size()
+                << "\n";
+    }
+
+    // We might have a target outside our program section. We are not going to
+    // consider those.
+    if (!m_virtual_data.get(disassembly_range_begin)) {
+      if (m_debug) {
+        std::cout << "Discarding a target outside the program section.\n";
+      }
+      continue;
+    }
+
+    targets.insert(disassembly_range_begin);
+
+    if (m_decoded.find(disassembly_range_begin) != m_decoded.end()) {
+      if (m_debug) {
+        std::cout << "We have exactly started here in the past. There's no "
+                     "need to do it again.\n";
+      }
+      continue;
+    };
+
+    uint64_t disassembly_range_end =
+        m_virtual_data.start() + m_virtual_data.size();
+    // We want to find the first guaranteed decoded instruction after
+    // disassembly_range_begin, if one exists.
+    auto nearest_confirmed_rip =
+        std::find_if(targets.begin(), targets.end(),
+                     [disassembly_range_begin](auto comparison) {
+                       return comparison > disassembly_range_begin;
+                     });
+
+    if (nearest_confirmed_rip != targets.end()) {
+      disassembly_range_end = *nearest_confirmed_rip;
+    } else {
+      if (m_debug) {
+        std::cout << "Couldn't find a place to stop -- going all the way to "
+                     "the end of the section!\n";
+      }
+    }
+
+    if (m_debug) {
+      std::cout << "Doing a linear disassembly from 0x" << std::hex
+                << disassembly_range_begin << " to 0x" << disassembly_range_end
+                << std::dec << "\n";
+    }
+
+    if (m_debug) {
+      std::cout << "Starting by destroying all the previous disassembly!\n";
+    }
+
+    std::erase_if(m_decoded, [disassembly_range_begin,
+                              disassembly_range_end](auto comparison) {
+      return (disassembly_range_begin < comparison.first) &&
+             (comparison.first > disassembly_range_end);
+    });
+
+    uint64_t current_rip = disassembly_range_begin;
+    while (current_rip < disassembly_range_end) {
+
+      if (m_debug) {
+        std::cout << "current_rip: 0x" << std::hex << current_rip << std::dec
+                  << "\n";
+      }
+
+      if (ZYAN_FAILED((ZydisDecoderDecodeFull(
+              &decoder, m_virtual_data.get(current_rip), LARGEST_X86_64_INSTR,
+              &instruction, operands, ZYDIS_MAX_OPERAND_COUNT_VISIBLE,
+              ZYDIS_DFLAG_VISIBLE_OPERANDS_ONLY)))) {
+        bad_insn_addr = current_rip;
+        return false;
+      }
+
+      if (ZYAN_FAILED(ZydisFormatterFormatInstruction(
+              &formatter, &instruction, operands,
+              instruction.operand_count_visible, decoded_instruction_buffer,
+              sizeof(decoded_instruction_buffer), current_rip))) {
+        bad_insn_addr = current_rip;
+        return false;
+      }
+
+      if ((current_rip + instruction.length) > disassembly_range_end) {
+        // This instruction spans over a confirmed instruction. Do not allow it!
+        if (m_debug) {
+          std::cout << "Interesting: Instruction at 0x" << std::hex
+                    << current_rip << std::dec << " is " << instruction.length
+                    << " long which crosses over a confirmed instruction at 0x"
+                    << std::hex << (disassembly_range_end) << ".\n";
+        }
+        break;
+      }
+
+      if ((instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
+           instruction.meta.category == ZYDIS_CATEGORY_COND_BR ||
+           instruction.meta.category == ZYDIS_CATEGORY_CALL) &&
+          (operands[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE)) {
+        assert(instruction.operand_count >= 1);
+        uint64_t target = 0;
+        if (!operands[0].imm.is_relative) {
+          target = operands[0].imm.value.u;
+        } else {
+          if (operands[0].imm.is_signed) {
+            target =
+                (current_rip + instruction.length) + operands[0].imm.value.s;
+          } else {
+            target =
+                (current_rip + instruction.length) + operands[0].imm.value.u;
+          }
+        }
+
+        if (m_debug) {
+          std::cout << "considering a branch with target: 0x" << std::hex
+                    << target << std::dec << "\n";
+        }
+        if ((std::find_if(targets_to_consider.begin(),
+                          targets_to_consider.end(),
+                          [target](auto comparison) {
+                            return target == comparison;
+                          }) == targets_to_consider.end()) &&
+            (std::find_if(targets.begin(), targets.end(),
+                          [target](auto comparison) {
+                            return target == comparison;
+                          }) == targets.end())) {
+          if (m_debug) {
+            std::cout << "0x" << std::hex << target
+                      << " has not already been considered. Adding it now.\n";
+          }
+          targets_to_consider.push_back(target);
+        } else {
+          if (m_debug) {
+            std::cout << "0x" << std::hex << target
+                      << " is already going to be considered. No need to add "
+                         "it again.\n";
+          }
+        }
+      }
+
+      m_decoded[current_rip] = std::string{decoded_instruction_buffer};
+
+      current_rip += instruction.length;
+    }
+  }
+  m_disassembled = true;
+  return true;
+}
+
+bool RecursiveABCD::output_disassembly(std::ostream &os) const {
+
+  if (!m_disassembled) {
+    return false;
+  }
+  std::vector<uint64_t> addr_locs{};
+  for (auto key : m_decoded) {
+    addr_locs.push_back(key.first);
+  }
+  std::sort(addr_locs.begin(), addr_locs.end());
+
+  os << m_filename << "\tentry point: 0x" << std::hex << m_entry_point << "\n"
+     << std::dec;
+  for (auto key : addr_locs) {
+    // Have to use at() here because otherwise we cannot
+    // make this a const member function (because [] *may*
+    // change the value of something in the map).
+    os << std::hex << key << ": " << m_decoded.at(key) << "\n";
+  }
+
+  return true;
+}
+
+bool LinearABCD::disassemble(uint64_t &bad_insn_addr) {
   if (!m_initialized) {
     bad_insn_addr = 0;
     return false;
@@ -159,7 +361,7 @@ bool ABCD::linear_disassemble(uint64_t &bad_insn_addr) {
   return true;
 }
 
-bool ABCD::output_disassembly(std::ostream &os) const {
+bool LinearABCD::output_disassembly(std::ostream &os) const {
 
   if (!m_disassembled) {
     return false;

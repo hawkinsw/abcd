@@ -8,9 +8,10 @@
 
 int main(int argc, char *argv[]) {
   args::ArgumentParser parser(
-      "Perform recursively disassembly of an ELF binary.");
+      "Perform disassembly of an ELF binary.");
   args::HelpFlag help(parser, "help", "Display this help menu", {'h', "help"});
   args::Flag debug(parser, "debug", "Enable debugging.", {"d", "debug"});
+  args::Flag disassemble_recursively(parser, "recursive", "Disassemble recursively.", {"r", "recursive"});
   args::ValueFlag<std::string> outfile_param(
       parser, "outfile", "Store output to a file", {"o", "outfile"});
   args::Positional<std::string> binary(
@@ -35,7 +36,7 @@ int main(int argc, char *argv[]) {
   if (outfile_param) {
     outfile_stream.open(outfile_param.Get(), std::ios::trunc);
     if (!outfile_stream.is_open()) {
-      std::cerr << "Error: Could not open output file ... output will be send "
+      std::cerr << "Error: Could not open output file ... output will be sent "
                    "to stdout!\n";
     }
   }
@@ -51,9 +52,15 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE);
   }
 
-  ABCD abcd{binary.Get(), ".text", debug};
+  ABCD *abcd = nullptr;
+  if (disassemble_recursively) {
+    abcd = new RecursiveABCD{binary.Get(), ".text", debug};
+  } else {
+    abcd = new LinearABCD{binary.Get(), ".text", debug};
+  }
+
   std::string initialization_error_msg{""};
-  if (!abcd.initialize(initialization_error_msg)) {
+  if (!abcd->initialize(initialization_error_msg)) {
     std::cerr << "Initialization failed: " << initialization_error_msg << "\n";
     if (outfile_stream.is_open()) {
       outfile_stream.close();
@@ -62,7 +69,7 @@ int main(int argc, char *argv[]) {
   }
 
   uint64_t bad_address{0};
-  if (!abcd.linear_disassemble(bad_address)) {
+  if (!abcd->disassemble(bad_address)) {
     std::cerr << "Failed to disassemble instruction at 0x" << std::hex
               << bad_address << std::dec << ".\n";
     if (outfile_stream.is_open()) {
@@ -71,13 +78,15 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE);
   }
 
-  if (!abcd.output_disassembly(output_stream)) {
+  if (!abcd->output_disassembly(output_stream)) {
     std::cerr << "Failed to save disassembly to output!\n";
   }
 
   if (outfile_stream.is_open()) {
     outfile_stream.close();
   }
+
+  delete abcd;
 
   return 0;
 }
